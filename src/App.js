@@ -1,6 +1,13 @@
+// src/App.js
 import React, { useState, useEffect, useRef } from "react";
-
-const LOCAL_KEY = "react_todo_func.tasks";
+import {
+  addTodoFirestore,
+  updateTodoFirestore,
+  deleteTodoFirestore,
+  subscribeTodos,
+  ensureAnonymousAuth
+} from "./firebase";
+import "./index.css";
 
 /* ---------------------- TodoInput ---------------------- */
 function TodoInput({ onAdd }) {
@@ -47,12 +54,12 @@ function TodoItem({ task, onToggle, onDelete, onEdit }) {
     setText(task.text);
   }, [task.text]);
 
-  const save = () => {
+  const save = async () => {
     const trimmed = text.trim();
     if (!trimmed) {
-      onDelete(task.id);
+      await onDelete(task.id);
     } else {
-      onEdit(task.id, trimmed);
+      await onEdit(task.id, trimmed);
     }
     setEditing(false);
   };
@@ -68,7 +75,11 @@ function TodoItem({ task, onToggle, onDelete, onEdit }) {
   return (
     <li className={`todo-item ${task.completed ? "completed" : ""}`}>
       <label className="left">
-        <input type="checkbox" checked={task.completed} onChange={() => onToggle(task.id)} />
+        <input
+          type="checkbox"
+          checked={!!task.completed}
+          onChange={() => onToggle(task.id, !task.completed)}
+        />
       </label>
 
       {!editing ? (
@@ -112,29 +123,92 @@ function TodoList({ tasks, onToggle, onDelete, onEdit }) {
 export default function App() {
   const [tasks, setTasks] = useState([]);
   const [filter, setFilter] = useState("all"); // all | active | completed
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const raw = localStorage.getItem(LOCAL_KEY);
-    if (raw) setTasks(JSON.parse(raw));
+    // Ensure auth (optional) and subscribe to Firestore todos
+    let unsub = () => {};
+    (async () => {
+      try {
+        await ensureAnonymousAuth(); // safe to call even if already signed in
+      } catch (e) {
+        console.warn("Auth error", e);
+      }
+
+      try {
+        unsub = subscribeTodos((items) => {
+          // items is an array of { id, ...data }
+          setTasks(items);
+          setLoading(false);
+        });
+      } catch (e) {
+        console.error("Subscribe failed", e);
+        setLoading(false);
+      }
+    })();
+
+    return () => {
+      try {
+        unsub();
+      } catch {}
+    };
   }, []);
 
-  useEffect(() => {
-    localStorage.setItem(LOCAL_KEY, JSON.stringify(tasks));
-  }, [tasks]);
+  // Add a new task (writes to Firestore)
+  // temporary test addTask - paste into App.js and wire to your TodoInput
+const addTask = async (text) => {
+  console.log("Trying to add task:", text);
+  try {
+    const docRef = await addTodoFirestore({
+      text,
+      completed: false,
+      createdAt: Date.now()
+    });
+    console.log("Firestore add succeeded, doc id:", docRef.id);
+  } catch (err) {
+    console.error("Firestore add FAILED:", err);
+    alert("Add failed: " + (err.message || err.code || JSON.stringify(err)));
+  }
+};
 
-  const addTask = (text) => {
-    const newTask = { id: Date.now().toString(), text, completed: false };
-    setTasks((s) => [newTask, ...s]);
+
+  // Toggle (mark complete/uncomplete)
+  const toggleTask = async (id, completed) => {
+    try {
+      await updateTodoFirestore(id, { completed });
+    } catch (e) {
+      console.error("Toggle failed:", e);
+    }
   };
 
-  const toggleTask = (id) =>
-    setTasks((s) => s.map((t) => (t.id === id ? { ...t, completed: !t.completed } : t)));
+  // Delete a task
+  const deleteTask = async (id) => {
+    try {
+      await deleteTodoFirestore(id);
+    } catch (e) {
+      console.error("Delete failed:", e);
+    }
+  };
 
-  const deleteTask = (id) => setTasks((s) => s.filter((t) => t.id !== id));
+  // Edit task text
+  const editTask = async (id, newText) => {
+    try {
+      await updateTodoFirestore(id, { text: newText });
+    } catch (e) {
+      console.error("Edit failed:", e);
+    }
+  };
 
-  const editTask = (id, newText) => setTasks((s) => s.map((t) => (t.id === id ? { ...t, text: newText } : t)));
-
-  const clearCompleted = () => setTasks((s) => s.filter((t) => !t.completed));
+  // Clear completed tasks (sequential / parallel deletes)
+  const clearCompleted = async () => {
+    const completed = tasks.filter((t) => t.completed);
+    if (completed.length === 0) return;
+    try {
+      await Promise.all(completed.map((t) => deleteTodoFirestore(t.id)));
+    } catch (e) {
+      console.error("Clear completed failed:", e);
+    }
+  };
 
   const filtered = tasks.filter((t) => {
     if (filter === "active") return !t.completed;
@@ -144,7 +218,7 @@ export default function App() {
 
   return (
     <div className="app">
-      <h1>React — Functional To-Do</h1>
+      <h1>React — Functional To-Do (Firestore)</h1>
       <TodoInput onAdd={addTask} />
 
       <div className="controls">
@@ -156,10 +230,10 @@ export default function App() {
         <button className="clear" onClick={clearCompleted}>Clear completed</button>
       </div>
 
-      <TodoList tasks={filtered} onToggle={toggleTask} onDelete={deleteTask} onEdit={editTask} />
+      {loading ? <p className="empty">Loading tasks...</p> : <TodoList tasks={filtered} onToggle={toggleTask} onDelete={deleteTask} onEdit={editTask} />}
 
       <footer className="footer">
-        <span>{tasks.filter(t => !t.completed).length} items left</span>
+        <span>{tasks.filter((t) => !t.completed).length} items left</span>
       </footer>
     </div>
   );
